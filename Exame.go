@@ -36,18 +36,20 @@ type Process struct{
 	ServerConn *net.UDPConn  //a sua conexao servidora
 	x int  //coordenadas atuais
 	y int
-	sucX int
+	sucX int  //posicoes sucessoras na movimentacao
 	sucY int
-	terrainMarks []bool
-	leader int
-	isLeader bool
-	sensor []int
+	terrainMarks []bool  //marca posicoes ja verificadas no terreno
+	leader int  //Identifica o lider
+	isLeader bool  //identifica se eh lider
+	sensor []int  //mantem cópia do mapa de temperaturas do terreno
 }
 
+//mapeia coordenadas do terreno em indices para o vetor
 func coord2ind(x, y int) (int){
 	return y*LENGTH + x
 }
 
+//gera os valores de temperatura de cada ponto do terreno
 func createTerrain(terrain []int){
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i:=0; i < LENGTH*LENGTH -1;i++{
@@ -62,6 +64,7 @@ func createTerrain(terrain []int){
 	}
 }
 
+//Nao precisa se preocupar com o funcionamento desta funcao
 func (p *Process) MakeConnections(){
 	for j:=0; j < N; j++{
 		//Estabelecendo as conexoes
@@ -88,6 +91,7 @@ func (p *Process) MakeConnections(){
 	checkError(err)
 }
 
+//Envia broadcast de alguma mensagem a todos os outros processos
 func (p *Process) sendBroad(msg string) {
 	t:=time.Now()
 	from:= p.id
@@ -103,6 +107,13 @@ func (p *Process) sendBroad(msg string) {
 	}
 }
 
+//Eh realizado um loop infinito que fica aguardando por chegada de msgs
+//Pode ser interessante implementar um timeout
+//Todas as msgs estao no formato <1>;<2>;<3>;<4>(opcional)
+//<1> PID de origem
+//<2> PID de destino
+//<3> tipo da mensagem
+//<4> opcional, no caso de Q, envia o valor da temperatura
 func (p *Process) listen() (int){
 	buf := make([]byte, 100)
 	for{
@@ -115,6 +126,7 @@ func (p *Process) listen() (int){
 		t:=time.Now()
 		fmt.Println("<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >")
 		
+		//Caso seja uma
 		msgType := data[2]
 		if msgType == QUESTION{
 			var replymsg string
@@ -132,6 +144,7 @@ func (p *Process) listen() (int){
 		if msgType == RECUE{
 			p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
 		}
+		//A posicao do robo somente eh alterada se for possivel se locomover
 		if msgType == AVANCE{
 			p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
 			p.x = p.sucX;
@@ -143,6 +156,7 @@ func (p *Process) listen() (int){
 	}
 }
 
+//Envia msg para processo alvo
 func (p *Process) sendTo(msg string, id int) {
 	t:=time.Now()
 	//fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
@@ -166,6 +180,8 @@ func printErr(err error){
 	fmt.Println("< Server; Error: ",err, " >")
 }
 
+
+//Faz o robo se movimentar
 func (p *Process) move(){
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	//gera uma lista aleatoria para proximo caminho com todos os vizinhos
@@ -188,6 +204,10 @@ func (p *Process) move(){
 }
 
 
+//Neste exemplo, o líder não é escolhido por meio de processo de eleição
+//Alem disto, nao se movimenta tambem
+//Cada um dos outros robos, envia uma msg e aguarda resposta
+//O lider apenas ouve as perguntas e responde 
 func main(){
 	//Numero de processos
 	var wg sync.WaitGroup
@@ -204,7 +224,7 @@ func main(){
 				id: i, 
 				conns: make([]*net.UDPConn, N),
 				ports:make([]string, N),
-				y: LENGTH/N/2+LENGTH/N*i,
+				y: LENGTH/N/2+LENGTH/N*i,  //posicoes 'ok'
 				x: LENGTH/N/2+LENGTH/N*i,
 				terrainMarks: make([]bool, LENGTH*LENGTH),
 				isLeader: false,
