@@ -26,8 +26,10 @@ const ELECTION = "E"
 const OK = "OK"
 const LEADER = "L"
 const QUESTION = "Q"
-
-
+//Valores de timeout
+const ELECTION_TIMEOUT = 100
+const LEADER_TIMEOUT = 1500
+const MOVE_DELAY = 500
 
 type Process struct{
 	id int 	//id do processo
@@ -42,6 +44,10 @@ type Process struct{
 	leader int  //Identifica o lider
 	isLeader bool  //identifica se eh lider
 	sensor []int  //mantem cópia do mapa de temperaturas do terreno
+	electionOngoing bool  //eleição acontecendo
+	awaitingPermission bool  //permissão pra andar
+	dontTimeout chan string  //timeout de morte do lider
+	alive bool  //está vivo
 }
 
 //mapeia coordenadas do terreno em indices para o vetor
@@ -103,8 +109,35 @@ func (p *Process) sendBroad(msg string) {
 			buf := []byte(msg)
 			_, err := p.conns[j].Write(buf)
 			checkError(err)	
-		}	
+		}
 	}
+}
+
+func (p *Process) doElection(amLeader bool) {
+	if p.electionOngoing {
+		return;
+	}
+	p.electionOngoing = true;
+	p.isLeader = amLeader;
+	p.leader = -1;
+
+	//Declara início de eleição
+	for j:=0; j<N; j++ {
+		if j != p.id {
+			p.sendTo(ELECTION, j);
+		}
+	}
+	time.Sleep(time.Duration((p.id+1) * ELECTION_TIMEOUT) * time.Millisecond);
+	if p.isLeader {
+		fmt.Println(p.id, "elected leader");
+		p.leader = p.id;
+		for j:=0; j<N; j++ {
+			if j != p.id {
+				p.sendTo(LEADER, j);
+			}
+		}
+	}
+	p.electionOngoing = false;
 }
 
 //Eh realizado um loop infinito que fica aguardando por chegada de msgs
@@ -114,46 +147,85 @@ func (p *Process) sendBroad(msg string) {
 //<2> PID de destino
 //<3> tipo da mensagem
 //<4> opcional, no caso de Q, envia o valor da temperatura
-func (p *Process) listen() (int){
-	buf := make([]byte, 100)
-	for{
-		n, _, err := p.ServerConn.ReadFromUDP(buf)
-		checkError(err)
-		msg := string(buf[0:n])
-		data := strings.Split(msg,";")
-		from := data[0]
-		fmt.Println("from: ",data[0],"  to: ", data[1],  "content: ", data[2])
-		t:=time.Now()
-		fmt.Println("<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >")
+func (p *Process) runProcess() {
+	p.terrainMarks[coord2ind(p.x,p.y)] = true;
+
+	//Conecta e aguarda os outros conectarem
+	p.MakeConnections();
+	time.Sleep(100 * time.Millisecond);
+
+	//Morte
+	go p.scriptedDeath(5000 * (p.id+1));
+
+	//Eleição inicial
+	go p.doElection(true);
+
+	buf := make([]byte, 100);
+	for p.alive {
+		//Se não estiver esperando pra se mover, enviar nova solicitação de movimento
+		if !p.awaitingPermission {
+			go p.getSucXY();
+		}
+
+		n, _, err := p.ServerConn.ReadFromUDP(buf);
+		checkError(err);
+		msg := string(buf[0:n]);
+		data := strings.Split(msg,";");
+		from, _ := strconv.Atoi(data[0]);
+		fmt.Println("from: ", data[0], "  to: ", data[1], "content: ", data[2]);
+		t := time.Now();
+		fmt.Println("<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >");
 		
-		//Caso seja uma
-		msgType := data[2]
-		if msgType == QUESTION{
-			var replymsg string
-			fromInt,_ := strconv.Atoi(from)
-			temp,_:= strconv.Atoi(data[3])
-			if temp < TEMP_THRESHOLD{
-				replymsg = AVANCE
-			}else{
-				replymsg = RECUE
-			}
-			p.sendTo(replymsg, fromInt)
+
+		switch msgType := data[2]; msgType {
+			//Caso seja uma questão
+			case QUESTION:
+				var replymsg string;
+				temp,_:= strconv.Atoi(data[3]);
+				if temp < TEMP_THRESHOLD {
+					replymsg = AVANCE;
+				} else {
+					replymsg = RECUE;
+				}
+				p.sendTo(replymsg, from);
+
+			//Caso seja o caso, o robo fica parado na sua posicao e marca como
+			//visitada a posicao que perguntou
+			case RECUE:
+				p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
+				p.awaitingPermission = false;
+				p.dontTimeout <- "message received"; //avisa que o líder não deu timeout
+
+			//A posicao do robo somente eh alterada se for possivel se locomover
+			case AVANCE:
+				p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
+				p.x = p.sucX;
+				p.y = p.sucY;
+				p.awaitingPermission = false;
+				p.dontTimeout <- "message received"; //avisa que o líder não deu timeout
+
+			//Mensagem de eleição
+			case ELECTION:
+				if (from < p.id) {
+					go p.doElection(false);
+					p.isLeader = false;
+				} else {
+					p.sendTo(ELECTION, from);
+					go p.doElection(true);
+				}
+			
+			//Novo lider declarado
+			case LEADER:
+				p.leader = from;
+				p.isLeader = (from == p.id);
+
+			//Mensagem desconhecida
+			default:
+				fmt.Println("Unknown message received:", msg);
 		}
-		//Caso seja o caso, o robo fica parado na sua posicao e marca como
-		//visitada a posicao que perguntou
-		if msgType == RECUE{
-			p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
-		}
-		//A posicao do robo somente eh alterada se for possivel se locomover
-		if msgType == AVANCE{
-			p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
-			p.x = p.sucX;
-			p.y = p.sucY;
-		}
-		//Endereco na mensagem em ascii
-		aux,_ := strconv.Atoi(data[0])
-		return aux
 	}
+	
+	fmt.Println("Process", strconv.Itoa(p.id), "died");
 }
 
 //Envia msg para processo alvo
@@ -182,25 +254,58 @@ func printErr(err error){
 
 
 //Faz o robo se movimentar
-func (p *Process) move(){
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+func (p *Process) getSucXY() {
+	if p.awaitingPermission || !p.alive{
+		return;
+	}
+	p.awaitingPermission = true;
+
+	//Delay para vizualização
+	time.Sleep(time.Duration(MOVE_DELAY) * time.Millisecond);
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()));
 	//gera uma lista aleatoria para proximo caminho com todos os vizinhos
-	sucessores := r.Perm(9)
-	var auxY, auxX int
-	for i:=0; i < 9; i++{
-		auxX = sucessores[i]%3-1
-		auxY = sucessores[i]/3-1
-		p.sucX = auxX + p.x
-		p.sucY = auxY + p.y
+	sucessores := r.Perm(9);
+	var auxY, auxX int;
+	for i:=0; i < 9; i++ {
+		auxX = sucessores[i]%3-1;
+		auxY = sucessores[i]/3-1;
+		p.sucX = auxX + p.x;
+		p.sucY = auxY + p.y;
 		//fmt.Println("processo ",p.id,"  sucX: ",p.sucX,"   sucY: ", p.sucY, "   ind: ", coord2ind(p.sucX, p.sucY))
-		if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false{
-			break
+		if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false {
+			break;
 		}
 	}
-	if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false{
-		tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)])
-		p.sendTo(QUESTION+";"+tempStr,p.leader)	
+	if !(p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false) {
+		for i:=0; i < 9; i++ {
+			auxX = sucessores[i]%3-1;
+			auxY = sucessores[i]/3-1;
+			p.sucX = auxX + p.x;
+			p.sucY = auxY + p.y;
+			if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH {
+				break;
+			}
+		}
 	}
+	tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)]);
+	//Espera lider ser eleito
+	for p.leader == -1 { }
+	p.sendTo(QUESTION+";"+tempStr,p.leader);
+
+	//Verifica timeout do lider
+	select {
+		case <- p.dontTimeout:
+		case <- time.After(time.Millisecond * LEADER_TIMEOUT):
+			fmt.Println("Leader timeout");
+			go p.doElection(!p.isLeader);
+			p.awaitingPermission = false;
+	}
+}
+
+func (p *Process) scriptedDeath(timeout int) {
+	time.Sleep(time.Duration(timeout) * time.Millisecond);
+	p.alive = false;
 }
 
 
@@ -210,60 +315,32 @@ func (p *Process) move(){
 //O lider apenas ouve as perguntas e responde 
 func main(){
 	//Numero de processos
-	var wg sync.WaitGroup
+	var wg sync.WaitGroup;
 	//Gerando matriz do terreno com temperaturas
-	terrain := make([]int, LENGTH*LENGTH)
-	createTerrain(terrain)
+	terrain := make([]int, LENGTH*LENGTH);
+	createTerrain(terrain);
 
-	procs := make([]*Process, N)
+
+	procs := make([]*Process, N);
 	for id := 0; id < N; id++{
 		wg.Add(1)
 		go func(i int){
 			//Inicializando cada um dos processos
-			procs[i] = &Process{
+			procs[i] = &Process {
 				id: i, 
 				conns: make([]*net.UDPConn, N),
 				ports:make([]string, N),
 				y: LENGTH/N/2+LENGTH/N*i,  //posicoes 'ok'
 				x: LENGTH/N/2+LENGTH/N*i,
 				terrainMarks: make([]bool, LENGTH*LENGTH),
+				electionOngoing: false,
 				isLeader: false,
-				sensor: terrain}
+				leader: -1,
+				dontTimeout: make(chan string),
+				sensor: terrain,
+				alive: true };
 			p := procs[i]
-			p.terrainMarks[coord2ind(p.x,p.y)] = true
-			fmt.Println(p.id,": x = ",p.x)
-			p.MakeConnections()
-
-			//A principio o lider sera hardcoded
-			if p.id == 0 {
-				p.isLeader = true
-				//Enviando broadcast
-				msg:="Hello broad, from Process "
-				p.sendBroad(msg)
-
-				//Esperando pelas respostas dos outros processos
-				for k:=true;k==true;{
-					p.listen()	
-				}
-			} else {
-				p.leader = 0
-				senderID := p.listen()
-
-				//Enviando resposta
-				msg:="Hi, from Process "+strconv.Itoa(p.id)+"!"
-				p.sendTo(msg, senderID)
-				for{
-					//Esperando pela chegada de alguma mensagem (broadcast)
-					//senderID := p.listen()
-
-					//Enviando resposta
-					//msg:="Hi, from Process "+strconv.Itoa(p.id)+"!"
-					//p.sendTo(msg, senderID)
-					p.move()
-					p.listen()
-				}
-			}
-
+			p.runProcess();
 		}(id)
 	}
 	wg.Wait()
