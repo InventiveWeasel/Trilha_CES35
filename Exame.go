@@ -12,7 +12,7 @@ import(
 )
 
 //Numero de processos
-const N = 4
+const N = 3
 //Tamanho do terreno
 const LENGTH = 10
 const TEMP_MAX = 45
@@ -45,10 +45,19 @@ type Process struct{
 	leader int  //Identifica o lider
 	isLeader bool  //identifica se eh lider
 	sensor []int  //mantem cópia do mapa de temperaturas do terreno
+	output *os.File //arquivo de saída
 	electionOngoing bool  //eleição acontecendo
 	awaitingPermission bool  //permissão pra andar
 	dontTimeout chan string  //timeout de morte do lider
 	alive bool  //está vivo
+}
+
+func Println(p *Process, a ...interface{}) {
+	fmt.Println(a);
+	s := fmt.Sprint(a) + "\r\n"
+	buf := []byte(s)
+	_, err := p.output.Write(buf)
+	checkError(err)
 }
 
 //mapeia coordenadas do terreno em indices para o vetor
@@ -56,16 +65,51 @@ func coord2ind(x, y int) (int){
 	return y*LENGTH + x
 }
 
+func printKnownTerrain(p *Process) {
+	s := "\r\nTerreno conhecido\r\n"
+
+	for i:=0; i < LENGTH*LENGTH; i++ {
+		if p.terrainMarks[i] {
+			if coord2ind(p.x, p.y) == i {
+				s += "OO"
+			} else if (p.sensor[i] < 0) {
+				s += "XX"
+			} else {
+				s += strconv.Itoa(p.sensor[i])
+			}
+		} else {
+			s += "??"
+		}
+
+		if (i+1)%LENGTH == 0 {
+			s += "\r\n"
+		} else {
+			s += " "
+		}
+	}
+
+	Println(p, s)
+}
+
 //gera os valores de temperatura de cada ponto do terreno
 func createTerrain(terrain []int){
+	fmt.Print("Terreno gerado\r\n")
+
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i:=0; i < LENGTH*LENGTH -1;i++{
+	for i:=0; i < LENGTH*LENGTH; i++ {
 		temp:= r.Intn(10)+TEMP_MIN
-		fmt.Println("T = ",temp)
 		terrain[i] = temp
+
+		fmt.Print(temp)
+		if (i+1)%LENGTH == 0 {
+			fmt.Print("\r\n")
+		} else {
+			fmt.Print(" ")
+		}
 	}
+
 	//Fazer os processos iniciarem em areas seguras
-	for i:= 0; i < N; i++{
+	for i:= 0; i < N; i++ {
 		coord:=LENGTH/N/2+LENGTH/N*i
 		terrain[coord2ind(coord,coord)] = TEMP_MIN
 	}
@@ -102,7 +146,7 @@ func (p *Process) MakeConnections(){
 func (p *Process) sendBroad(msg string) {
 	t:=time.Now()
 	from:= p.id
-	fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending  '", msg ,"' to ALL >")
+	Println(p, "<",t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Sending '" + msg + "' to ALL >")
 	for j:=0; j < N; j++{
 		if j != p.id {
 			to := j
@@ -130,7 +174,7 @@ func (p *Process) doElection(amLeader bool) {
 	}
 	time.Sleep(time.Duration((p.id+1) * ELECTION_TIMEOUT) * time.Millisecond);
 	if p.isLeader {
-		fmt.Println(p.id, "elected leader");
+		Println(p, p.id, "elected leader");
 		p.leader = p.id;
 		for j:=0; j<N; j++ {
 			if j != p.id {
@@ -160,7 +204,9 @@ func (p *Process) runProcess() {
 	go p.scriptedDeath(DEATH_INTERVAL * (p.id+1));
 
 	//Eleição inicial
-	go p.doElection(true);
+	if p.leader == -1 {
+		go p.doElection(true);
+	}
 
 	buf := make([]byte, 100);
 	for p.alive {
@@ -174,11 +220,10 @@ func (p *Process) runProcess() {
 		msg := string(buf[0:n]);
 		data := strings.Split(msg,";");
 		from, _ := strconv.Atoi(data[0]);
-		fmt.Println("from: ", data[0], "  to: ", data[1], "content: ", data[2]);
+		//fmt.Println("from: ", data[0], "  to: ", data[1], "content: ", data[2]);
 		t := time.Now();
-		fmt.Println("<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >");
+		Println(p, "<", t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Received '" + msg + "' >")
 		
-
 		switch msgType := data[2]; msgType {
 			//Caso seja uma questão
 			case QUESTION:
@@ -195,8 +240,10 @@ func (p *Process) runProcess() {
 			//visitada a posicao que perguntou
 			case RECUE:
 				p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
+				p.sensor[coord2ind(p.sucX, p.sucY)] *= -1 //posicao de perigo
 				p.awaitingPermission = false;
 				p.dontTimeout <- "message received"; //avisa que o líder não deu timeout
+				printKnownTerrain(p)
 
 			//A posicao do robo somente eh alterada se for possivel se locomover
 			case AVANCE:
@@ -205,6 +252,7 @@ func (p *Process) runProcess() {
 				p.y = p.sucY;
 				p.awaitingPermission = false;
 				p.dontTimeout <- "message received"; //avisa que o líder não deu timeout
+				printKnownTerrain(p)
 
 			//Mensagem de eleição
 			case ELECTION:
@@ -223,7 +271,7 @@ func (p *Process) runProcess() {
 
 			//Mensagem desconhecida
 			default:
-				fmt.Println("Unknown message received:", msg);
+				Println(p, "Unknown message received:", msg);
 		}
 	}
 	
@@ -233,11 +281,11 @@ func (p *Process) runProcess() {
 //Envia msg para processo alvo
 func (p *Process) sendTo(msg string, id int) {
 	t:=time.Now()
-	//fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
+	//Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
 	from := p.id
 	to := strconv.Itoa(id)
 	msg = strconv.Itoa(from)+";"+to+";"+msg
-	fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
+	Println(p, "<",t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Sending '" + msg + "' >")
 	buf := []byte(msg)
 	_, err := p.conns[id].Write(buf)
 	checkError(err)
@@ -251,7 +299,7 @@ func checkError(err error){
 }
 
 func printErr(err error){
-	fmt.Println("< Server; Error: ",err, " >")
+	fmt.Println("< Server; Error:", err, ">")
 }
 
 
@@ -267,6 +315,7 @@ func (p *Process) getSucXY() {
 		//gera uma lista aleatoria para proximo caminho com todos os vizinhos
 		sucessores := r.Perm(9);
 		var auxY, auxX int;
+
 		for i:=0; i < 9; i++ {
 			auxX = sucessores[i]%3-1;
 			auxY = sucessores[i]/3-1;
@@ -288,20 +337,30 @@ func (p *Process) getSucXY() {
 				}
 			}
 		}
-		tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)]);
-		//Espera lider ser eleito
-		for p.leader == -1 { }
-		p.sendTo(QUESTION+";"+tempStr,p.leader);
 
-		//Verifica timeout do lider
-		select {
-			case <- p.dontTimeout:
-			case <- time.After(time.Millisecond * LEADER_TIMEOUT):
-				if p.alive {
-					fmt.Println("Leader timeout");
-					go p.doElection(true);
-					p.awaitingPermission = false;
-				}
+		//Se o novo local é não conhecido, pergunta pro lider
+		if !p.terrainMarks[coord2ind(p.sucX, p.sucY)] {
+			tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)]);
+			//Espera lider ser eleito
+			for p.leader == -1 { }
+			p.sendTo(QUESTION + ";" + tempStr, p.leader);
+
+			//Verifica timeout do lider
+			select {
+				case <- p.dontTimeout:
+				case <- time.After(time.Millisecond * LEADER_TIMEOUT):
+					if p.alive {
+						Println(p, "Leader timeout");
+						go p.doElection(true);
+						p.awaitingPermission = false;
+					}
+			}
+		} else if p.sensor[coord2ind(p.sucX, p.sucY)] > 0 {
+			p.x = p.sucX;
+			p.y = p.sucY;
+			p.awaitingPermission = false;
+		} else {
+			p.awaitingPermission = false;
 		}
 	}	
 }
@@ -310,7 +369,6 @@ func (p *Process) scriptedDeath(timeout int) {
 	time.Sleep(time.Duration(timeout) * time.Millisecond);
 	p.alive = false;
 }
-
 
 //Neste exemplo, o líder não é escolhido por meio de processo de eleição
 //Alem disto, nao se movimenta tambem
@@ -323,11 +381,14 @@ func main(){
 	terrain := make([]int, LENGTH*LENGTH);
 	createTerrain(terrain);
 
-
 	procs := make([]*Process, N);
 	for id := 0; id < N; id++{
 		wg.Add(1)
 		go func(i int){
+			file, err := os.Create("out" + strconv.Itoa(i) + ".txt")
+			checkError(err)
+			defer file.Close()
+
 			//Inicializando cada um dos processos
 			procs[i] = &Process {
 				id: i, 
@@ -338,12 +399,14 @@ func main(){
 				terrainMarks: make([]bool, LENGTH*LENGTH),
 				electionOngoing: false,
 				isLeader: false,
+				sensor: terrain,
+				output: file,
 				leader: -1,
 				dontTimeout: make(chan string),
-				sensor: terrain,
 				alive: true };
 			p := procs[i]
 			p.runProcess();
+
 		}(id)
 	}
 	wg.Wait()
