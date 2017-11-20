@@ -57,16 +57,51 @@ func coord2ind(x, y int) (int){
 	return y*LENGTH + x
 }
 
+func printKnownTerrain(p *Process) {
+	s := "\r\nTerreno conhecido\r\n"
+
+	for i:=0; i < LENGTH*LENGTH; i++ {
+		if p.terrainMarks[i] {
+			if coord2ind(p.x, p.y) == i {
+				s += "OO"
+			} else if (p.sensor[i] < 0) {
+				s += "XX"
+			} else {
+				s += strconv.Itoa(p.sensor[i])
+			}
+		} else {
+			s += "??"
+		}
+
+		if (i+1)%LENGTH == 0 {
+			s += "\r\n"
+		} else {
+			s += " "
+		}
+	}
+
+	Println(p, s)
+}
+
 //gera os valores de temperatura de cada ponto do terreno
 func createTerrain(terrain []int){
+	fmt.Print("Terreno gerado\r\n")
+
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i:=0; i < LENGTH*LENGTH -1;i++{
+	for i:=0; i < LENGTH*LENGTH; i++ {
 		temp:= r.Intn(10)+TEMP_MIN
-		fmt.Println("T = ",temp)
 		terrain[i] = temp
+
+		fmt.Print(temp)
+		if (i+1)%LENGTH == 0 {
+			fmt.Print("\r\n")
+		} else {
+			fmt.Print(" ")
+		}
 	}
+
 	//Fazer os processos iniciarem em areas seguras
-	for i:= 0; i < N; i++{
+	for i:= 0; i < N; i++ {
 		coord:=LENGTH/N/2+LENGTH/N*i
 		terrain[coord2ind(coord,coord)] = TEMP_MIN
 	}
@@ -103,7 +138,7 @@ func (p *Process) MakeConnections(){
 func (p *Process) sendBroad(msg string) {
 	t:=time.Now()
 	from:= p.id
-	Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending  '", msg ,"' to ALL >")
+	Println(p, "<",t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Sending '" + msg + "' to ALL >")
 	for j:=0; j < N; j++{
 		if j != p.id {
 			to := j
@@ -130,9 +165,9 @@ func (p *Process) listen() (int){
 		msg := string(buf[0:n])
 		data := strings.Split(msg,";")
 		from := data[0]
-		Println(p, "from: ",data[0],"  to: ", data[1],  "content: ", data[2])
+		//Println(p, "from: ",data[0],"  to: ", data[1],  "content: ", data[2])
 		t:=time.Now()
-		Println(p, "<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >")
+		Println(p, "<", t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Received '" + msg + "' >")
 		
 		//Caso seja uma
 		msgType := data[2]
@@ -151,6 +186,7 @@ func (p *Process) listen() (int){
 		//visitada a posicao que perguntou
 		if msgType == RECUE{
 			p.terrainMarks[coord2ind(p.sucX, p.sucY)] = true
+			p.sensor[coord2ind(p.sucX, p.sucY)] *= -1 // valor desconhecido, mas sabe-se que é perigoso
 		}
 		//A posicao do robo somente eh alterada se for possivel se locomover
 		if msgType == AVANCE{
@@ -171,7 +207,7 @@ func (p *Process) sendTo(msg string, id int) {
 	from := p.id
 	to := strconv.Itoa(id)
 	msg = strconv.Itoa(from)+";"+to+";"+msg
-	Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
+	Println(p, "<",t.Format("15:04:05.000000"), "Process:", strconv.Itoa(p.id) + "; Sending '" + msg + "' >")
 	buf := []byte(msg)
 	_, err := p.conns[id].Write(buf)
 	checkError(err)
@@ -185,7 +221,7 @@ func checkError(err error){
 }
 
 func printErr(err error){
-	fmt.Println("< Server; Error: ",err, " >")
+	fmt.Println("< Server; Error:", err, ">")
 }
 
 
@@ -273,6 +309,7 @@ func main(){
 					//msg:="Hi, from Process "+strconv.Itoa(p.id)+"!"
 					//p.sendTo(msg, senderID)
 					p.move()
+					printKnownTerrain(p)
 					p.listen()
 				}
 			}
