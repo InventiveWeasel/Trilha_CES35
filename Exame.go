@@ -42,6 +42,14 @@ type Process struct{
 	leader int  //Identifica o lider
 	isLeader bool  //identifica se eh lider
 	sensor []int  //mantem cópia do mapa de temperaturas do terreno
+	output *os.File
+}
+
+func Println(p *Process, a ...interface{}) {
+	s := fmt.Sprint(a) + "\r\n"
+	buf := []byte(s)
+	_, err := p.output.Write(buf)
+	checkError(err)
 }
 
 //mapeia coordenadas do terreno em indices para o vetor
@@ -95,7 +103,7 @@ func (p *Process) MakeConnections(){
 func (p *Process) sendBroad(msg string) {
 	t:=time.Now()
 	from:= p.id
-	fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending  '", msg ,"' to ALL >")
+	Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending  '", msg ,"' to ALL >")
 	for j:=0; j < N; j++{
 		if j != p.id {
 			to := j
@@ -122,9 +130,9 @@ func (p *Process) listen() (int){
 		msg := string(buf[0:n])
 		data := strings.Split(msg,";")
 		from := data[0]
-		fmt.Println("from: ",data[0],"  to: ", data[1],  "content: ", data[2])
+		Println(p, "from: ",data[0],"  to: ", data[1],  "content: ", data[2])
 		t:=time.Now()
-		fmt.Println("<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >")
+		Println(p, "<", t.Format("15:04:05.000000"), " Process:",p.id," ; Received '",msg, "' >")
 		
 		//Caso seja uma
 		msgType := data[2]
@@ -159,11 +167,11 @@ func (p *Process) listen() (int){
 //Envia msg para processo alvo
 func (p *Process) sendTo(msg string, id int) {
 	t:=time.Now()
-	//fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
+	//Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
 	from := p.id
 	to := strconv.Itoa(id)
 	msg = strconv.Itoa(from)+";"+to+";"+msg
-	fmt.Println("<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
+	Println(p, "<",t.Format("15:04:05.000000"), " Process:", p.id, " ; Sending '", msg ,"' >")
 	buf := []byte(msg)
 	_, err := p.conns[id].Write(buf)
 	checkError(err)
@@ -192,7 +200,7 @@ func (p *Process) move(){
 		auxY = sucessores[i]/3-1
 		p.sucX = auxX + p.x
 		p.sucY = auxY + p.y
-		//fmt.Println("processo ",p.id,"  sucX: ",p.sucX,"   sucY: ", p.sucY, "   ind: ", coord2ind(p.sucX, p.sucY))
+		//Println(p, "processo ",p.id,"  sucX: ",p.sucX,"   sucY: ", p.sucY, "   ind: ", coord2ind(p.sucX, p.sucY))
 		if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false{
 			break
 		}
@@ -219,6 +227,10 @@ func main(){
 	for id := 0; id < N; id++{
 		wg.Add(1)
 		go func(i int){
+			file, err := os.Create("out" + strconv.Itoa(i) + ".txt")
+			checkError(err)
+			defer file.Close()
+
 			//Inicializando cada um dos processos
 			procs[i] = &Process{
 				id: i, 
@@ -228,10 +240,11 @@ func main(){
 				x: LENGTH/N/2+LENGTH/N*i,
 				terrainMarks: make([]bool, LENGTH*LENGTH),
 				isLeader: false,
-				sensor: terrain}
+				sensor: terrain,
+				output: file }
 			p := procs[i]
 			p.terrainMarks[coord2ind(p.x,p.y)] = true
-			fmt.Println(p.id,": x = ",p.x)
+			Println(p, p.id,": x = ",p.x)
 			p.MakeConnections()
 
 			//A principio o lider sera hardcoded
