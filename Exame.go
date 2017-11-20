@@ -12,7 +12,7 @@ import(
 )
 
 //Numero de processos
-const N = 3
+const N = 4
 //Tamanho do terreno
 const LENGTH = 10
 const TEMP_MAX = 45
@@ -30,6 +30,7 @@ const QUESTION = "Q"
 const ELECTION_TIMEOUT = 100
 const LEADER_TIMEOUT = 1500
 const MOVE_DELAY = 500
+const DEATH_INTERVAL = 5000
 
 type Process struct{
 	id int 	//id do processo
@@ -122,7 +123,7 @@ func (p *Process) doElection(amLeader bool) {
 	p.leader = -1;
 
 	//Declara início de eleição
-	for j:=0; j<N; j++ {
+	for j:=0; j<N && p.isLeader; j++ {
 		if j != p.id {
 			p.sendTo(ELECTION, j);
 		}
@@ -152,10 +153,11 @@ func (p *Process) runProcess() {
 
 	//Conecta e aguarda os outros conectarem
 	p.MakeConnections();
-	time.Sleep(100 * time.Millisecond);
+	time.Sleep(time.Duration(MOVE_DELAY) * time.Millisecond);
+	time.Sleep(time.Duration((MOVE_DELAY*p.id)/N) * time.Millisecond);
 
-	//Morte
-	go p.scriptedDeath(5000 * (p.id+1));
+	//Morte scriptada
+	go p.scriptedDeath(DEATH_INTERVAL * (p.id+1));
 
 	//Eleição inicial
 	go p.doElection(true);
@@ -255,52 +257,53 @@ func printErr(err error){
 
 //Faz o robo se movimentar
 func (p *Process) getSucXY() {
-	if p.awaitingPermission || !p.alive{
-		return;
-	}
-	p.awaitingPermission = true;
+	for !p.awaitingPermission && p.alive {
+		p.awaitingPermission = true;
 
-	//Delay para vizualização
-	time.Sleep(time.Duration(MOVE_DELAY) * time.Millisecond);
+		//Delay para vizualização
+		time.Sleep(time.Duration(MOVE_DELAY) * time.Millisecond);
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()));
-	//gera uma lista aleatoria para proximo caminho com todos os vizinhos
-	sucessores := r.Perm(9);
-	var auxY, auxX int;
-	for i:=0; i < 9; i++ {
-		auxX = sucessores[i]%3-1;
-		auxY = sucessores[i]/3-1;
-		p.sucX = auxX + p.x;
-		p.sucY = auxY + p.y;
-		//fmt.Println("processo ",p.id,"  sucX: ",p.sucX,"   sucY: ", p.sucY, "   ind: ", coord2ind(p.sucX, p.sucY))
-		if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false {
-			break;
-		}
-	}
-	if !(p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false) {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()));
+		//gera uma lista aleatoria para proximo caminho com todos os vizinhos
+		sucessores := r.Perm(9);
+		var auxY, auxX int;
 		for i:=0; i < 9; i++ {
 			auxX = sucessores[i]%3-1;
 			auxY = sucessores[i]/3-1;
 			p.sucX = auxX + p.x;
 			p.sucY = auxY + p.y;
-			if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH {
+			//fmt.Println("processo ",p.id,"  sucX: ",p.sucX,"   sucY: ", p.sucY, "   ind: ", coord2ind(p.sucX, p.sucY))
+			if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false {
 				break;
 			}
 		}
-	}
-	tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)]);
-	//Espera lider ser eleito
-	for p.leader == -1 { }
-	p.sendTo(QUESTION+";"+tempStr,p.leader);
+		if !(p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH && p.terrainMarks[coord2ind(p.sucX, p.sucY)] == false) {
+			for i:=0; i < 9; i++ {
+				auxX = sucessores[i]%3-1;
+				auxY = sucessores[i]/3-1;
+				p.sucX = auxX + p.x;
+				p.sucY = auxY + p.y;
+				if p.sucY >= 0 && p.sucX >= 0 && p.sucX < LENGTH && p.sucY < LENGTH {
+					break;
+				}
+			}
+		}
+		tempStr := strconv.Itoa(p.sensor[coord2ind(p.sucX, p.sucY)]);
+		//Espera lider ser eleito
+		for p.leader == -1 { }
+		p.sendTo(QUESTION+";"+tempStr,p.leader);
 
-	//Verifica timeout do lider
-	select {
-		case <- p.dontTimeout:
-		case <- time.After(time.Millisecond * LEADER_TIMEOUT):
-			fmt.Println("Leader timeout");
-			go p.doElection(!p.isLeader);
-			p.awaitingPermission = false;
-	}
+		//Verifica timeout do lider
+		select {
+			case <- p.dontTimeout:
+			case <- time.After(time.Millisecond * LEADER_TIMEOUT):
+				if p.alive {
+					fmt.Println("Leader timeout");
+					go p.doElection(true);
+					p.awaitingPermission = false;
+				}
+		}
+	}	
 }
 
 func (p *Process) scriptedDeath(timeout int) {
